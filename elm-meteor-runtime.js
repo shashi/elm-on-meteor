@@ -6500,7 +6500,6 @@ function init(display, container, module, moduleToReplace) {
 
   var updateInProgress = false;
   function notify(id, v) {
-      console.log(id, v, updateInProgress);
       if (updateInProgress) {
           throw new Error(
               'The notify function has been called synchronously!\n' +
@@ -6569,13 +6568,13 @@ function init(display, container, module, moduleToReplace) {
 
   var Module = {};
   var reportAnyErrors = function() {};
-//try {
+  try {
       Module = module.make(elm);
-//} catch(e) {
-//    var directions = "<br/>&nbsp; &nbsp; Open the developer console for more details."
-//    Module.main = Elm.Text.make(elm).text('<code>' + e.message + directions + '</code>');
-//    reportAnyErrors = function() { throw e; }
-//}
+  } catch(e) {
+      var directions = "<br/>&nbsp; &nbsp; Open the developer console for more details."
+      Module.main = Elm.Text.make(elm).text('<code>' + e.message + directions + '</code>');
+      reportAnyErrors = function() { throw e; }
+  }
   inputs = ElmRuntime.filterDeadInputs(inputs);
   filterListeners(inputs, listeners);
   if (display !== ElmRuntime.Display.NONE) {

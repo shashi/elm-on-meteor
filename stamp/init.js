@@ -7,7 +7,8 @@ if (Meteor.isClient) {
 }
 
 if (Meteor.isServer) {
-    (function (Elm) {
-        new Meteor.Collection("points");
-    })(Elm);
+    var points = new Meteor.Collection("points");
+    Meteor.startup(function() {
+        points.remove({});
+    });
 }
