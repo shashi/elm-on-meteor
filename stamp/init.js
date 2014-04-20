@@ -7,8 +7,7 @@ if (Meteor.isClient) {
 }
 
 if (Meteor.isServer) {
-    var points = new Meteor.Collection("points");
-    Meteor.startup(function() {
-        points.remove({});
-    });
+    var messages = new Meteor.Collection("points");
+    var messages = new Meteor.Collection("messages");
+    var sessions = new Meteor.Collection("sessions");
 }
