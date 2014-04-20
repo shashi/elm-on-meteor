@@ -1,7 +1,11 @@
 if (Meteor.isClient) {
     (function (Elm) {
             window.onload = function () {
-                Elm.fullscreen(Elm.Main);
+                if ('debuggerAttach' in Elm) {
+                    Elm.fullscreen(Elm.debuggerAttach(Elm.Main));
+                } else {
+                    Elm.fullscreen(Elm.Main);
+                }
             };
     })(Elm);
 }

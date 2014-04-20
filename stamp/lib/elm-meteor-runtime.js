@@ -786,10 +786,13 @@ Elm.Native.Debug.make = function(elm) {
     elm.Native = elm.Native || {};
     elm.Native.Debug = elm.Native.Debug || {};
     if (elm.Native.Debug.values) return elm.Native.Debug.values;
+    if ('values' in Elm.Native.Debug)
+        return elm.Native.Debug.values = Elm.Native.Debug.values;
 
     var show = Elm.Native.Show.make(elm).show;
+    var replace = Elm.Native.Utils.make(elm).replace;
 
-    function log(tag,value) {
+    function log(tag, value) {
         var msg = tag + ': ' + show(value);
         var process = process || {};
         if (process.stdout) {
@@ -800,10 +803,44 @@ Elm.Native.Debug.make = function(elm) {
         return value;
     }
 
-    return elm.Native.Debug.values = {
-        log: F2(log)
+    function tracePath(debugId, elem) {
+        var props = replace([["debugTracePathId",debugId]], elem.props);
+        return replace([["props",props]], elem);
+    }
+
+    function WatchTracker() {
+        this.frames = [{}];
+        this.clear = function() {
+            this.watches = {};
+        };
+        this.pushFrame = function() {
+            var lastFrame = this.frames[this.frames.length - 1];
+            this.frames.push(lastFrame);
+        }
+        this.notify = function(tag, value) {
+            this.frames[this.frames.length - 1][tag] = value;
+        };
+    }
+    var watchTracker = new WatchTracker();
+
+    function watch(tag, value) {
+        watchTracker.notify(tag, value);
+        return value;
+    }
+
+    function watchSummary(tag, f, value) {
+        watchTracker.notify(tag, f(value));
+        return value;
+    }
+
+    Elm.Native.Debug.values = {
+        tracePath: F2(tracePath),
+        log: F2(log),
+        watch: F2(watch),
+        watchSummary:F3(watchSummary),
+        watchTracker: watchTracker
     };
-    
+    return elm.Native.Debug.values = Elm.Native.Debug.values;
 };
 
 F2 = function(fun) {
@@ -982,598 +1019,6 @@ Elm.Native.Color.make = function(elm) {
     };
 
 };
-﻿Elm.Native.Array = {};
-Elm.Native.Array.make = function(elm) {
-    elm.Native = elm.Native || {};
-    elm.Native.Array = elm.Native.Array || {};
-    if (elm.Native.Array.values) return elm.Native.Array.values;
-    if ('values' in Elm.Native.Array)
-      return elm.Native.Array.values = Elm.Native.Array.values;
-
-    var List = Elm.Native.List.make(elm);
-
-    // A RRB-Tree has two distinct data types.
-    // Leaf -> "height"  is always 0
-    //         "table"   is an array of elements
-    // Node -> "height"  is always greater than 0
-    //         "table"   is an array of child nodes
-    //         "lengths" is an array of accumulated lengths of the child nodes
-
-    // M is the maximal table size. 32 seems fast. E is the allowed increase
-    // of search steps when concatting to find an index. Lower values will 
-    // decrease balancing, but will increase search steps.
-    var M = 32;
-    var E = 2;
-
-    // An empty array.
-    var empty = { ctor:"_Array", height:0, table:new Array() };
-
-    // Gets the value at index i recursively.
-    function get(i, array) {
-        if (i < 0 || i >= length(array)) {
-            throw new Error("Index " + i + " is out of range. Check the length of " +
-                            "your array first or use getMaybe or getWithDefault.");
-        }
-        return unsafeGet(i, array);
-    }
-
-    function unsafeGet(i, array) {
-        if (array.height == 0) {
-            return array.table[i];
-        }
-        var slot = getSlot(i, array);
-        var offset = slot > 0 ? array.lengths[slot-1] : 0;
-        return unsafeGet(i - offset, array.table[slot]);
-    }
-
-    // Sets the value at the index i. Only the nodes leading to i will get
-    // copied and updated.
-    function set(i, item, a) {
-      if (length(a) <= i) {
-        return a;
-      }
-      var newA = nodeCopy(a);
-      newA.table = a.table.slice();
-
-      if (a.height == 0) {
-        newA.table[i] = item;
-      } else {
-        var slot = getSlot(i, a);
-        var sub = slot > 0 ? a.lengths[slot-1] : 0;
-        newA.table[slot] = set(i - sub, item, a.table[slot]);
-      }
-      return newA;
-    }
-
-    function initialize(len, f) {
-      if (len == 0) { return empty; }
-      var h = Math.floor(Math.log(len)/Math.log(M));
-      return initialize_(f, h, 0, len);
-    }
-
-    function initialize_(f, h, from, to) {
-      if (h == 0) {
-        var table = new Array((to - from) % (M + 1));
-        for (var i = 0; i < table.length; i++) {
-          table[i] = f(from + i);
-        }
-        return { ctor:"_Array", height:0, table:table };
-      }
-
-      var step = Math.pow(M, h);
-      var table = new Array(Math.ceil((to - from) / step));
-      var lengths = new Array(table.length);
-      for (var i = 0; i < table.length; i++) {
-        table[i] = initialize_( f, h - 1, from + (i * step)
-                              , Math.min(from + ((i + 1) * step), to));
-        lengths[i] = length(table[i]) + (i > 0 ? lengths[i-1] : 0);
-      }
-      return { ctor:"_Array", height:h, table:table, lengths:lengths };
-    }
-
-    function fromList(list) {
-      if (list == List.Nil) { return empty; }
-
-      // Allocate M sized blocks (table) and write list elements to it.
-      var table = new Array(M);
-      var nodes = new Array();
-      var i = 0;
-
-      while (list.ctor !== '[]') {
-        table[i] = list._0;
-        list = list._1;
-        i++;
-
-        // table is full, so we can push a leaf containing it into the
-        // next node.
-        if (i == M) {
-          fromListPush({ ctor:"_Array", height:0, table:table }
-                      , nodes);
-          table = new Array(M);
-          i = 0;
-        }
-      }
-
-      // Maybe there is something left on the table.
-      if (i > 0) {
-        fromListPush({ ctor:"_Array", height:0, table:table.splice(0,i) }
-                    , nodes);
-      }
-
-      // Go through all of the nodes and eventually push them into higher nodes.
-      for (var h = 0; h < nodes.length - 1; h++) {
-        if (nodes[h].table.length > 0) {
-          fromListPush(nodes[h], nodes);
-        }
-      }
-
-      var head = nodes[nodes.length - 1];
-      if (head.height > 0 && head.table.length == 1) {
-        return head.table[0];
-      } else {
-        return head;
-      }
-    }
-
-    // Push a node into a higher node as a child.
-    function fromListPush(toPush, nodes) {
-      var h = toPush.height;
-
-      // Maybe the node on this height does not exist.
-      if (nodes.length == h) {
-        nodes.push({ ctor:"_Array", height:h + 1
-                                  , table:new Array()
-                                  , lengths:new Array() });
-      }
-
-      nodes[h].table.push(toPush);
-      var len = length(toPush);
-      if (nodes[h].lengths.length > 0) {
-        len += nodes[h].lengths[nodes[h].lengths.length - 1];
-      }
-      nodes[h].lengths.push(len);
-
-      if (nodes[h].table.length == M) {
-        fromListPush(nodes[h], nodes);
-        nodes[h] = { ctor:"_Array", height:h + 1
-                                  , table:new Array()
-                                  , lengths:new Array() };
-      }
-    }
-
-    // Pushes an item via push_ to the bottom right of a tree.
-    function push(item, a) {
-      var pushed = push_(item, a);
-      if (pushed !== null) {
-        return pushed;
-      }
-
-      var newTree = create(item, a.height);
-      return siblise(a, newTree);
-    }
-
-    // Recursively tries to push an item to the bottom-right most
-    // tree possible. If there is no space left for the item,
-    // null will be returned.
-    function push_(item, a) {
-      // Handle resursion stop at leaf level.
-      if (a.height == 0) {
-        if (a.table.length < M) {
-          var newA = { ctor:"_Array", height:0, table:a.table.slice() };
-          newA.table.push(item);
-          return newA;
-        } else {
-          return null;
-        }
-      }
-
-      // Recursively push
-      var pushed = push_(item, botRight(a));
-
-      // There was space in the bottom right tree, so the slot will
-      // be updated.
-      if (pushed != null) {
-        var newA = nodeCopy(a);
-        newA.table[newA.table.length - 1] = pushed;
-        newA.lengths[newA.lengths.length - 1]++;
-        return newA
-      }
-
-      // When there was no space left, check if there is space left
-      // for a new slot with a tree which contains only the item
-      // at the bottom.
-      if (a.table.length < M) {
-        var newSlot = create(item, a.height - 1);
-        var newA = nodeCopy(a);
-        newA.table.push(newSlot);
-        newA.lengths.push(newA.lengths[newA.lengths.length - 1] + length(newSlot));
-        return newA
-      } else {
-        return null;
-      }
-    }
-
-    // Converts an array into a list of elements.
-    function toList(a) {
-      return toList_(List.Nil, a);
-    }
-
-    function toList_(list, a) {
-      for (var i = a.table.length - 1; i >= 0; i--) {
-        list = a.height == 0 ? List.Cons(a.table[i], list) : toList_(list, a.table[i]);
-      }
-      return list;
-    }
-
-    // Maps a function over the elements of an array.
-    function map(f, a) {
-      var newA = { ctor:"_Array", height:a.height, table:new Array(a.table) };
-      if (a.height > 0) { newA.lengths = a.lengths; }
-      for (var i = 0; i < a.table.length; i++) {
-        newA.table[i] = a.height == 0 ? f(a.table[i]) : map(f, a.table[i]);
-      }
-      return newA;
-    }
-
-    // Maps a function over the elements with their index as first argument.
-    function indexedMap(f, a) {
-      var newA = { ctor:"_Array", height:a.height, table:new Array(a.table) };
-      if (a.height > 0) { newA.lengths = a.lengths; }
-      for (var i = 0; i < a.table.length; i++) {
-        newA.table[i] = a.height == 0 ? A2(f, i, a.table[i]) : indexedMap(f, a.table[i]);
-      }
-      return newA;
-    }
-
-    function foldl(f, b, a) {
-      for (var i = 0; i < a.table.length; i++) {
-        b = A2(f, a.height == 0 ? a.table[i] : foldl(f, b, a.table[i]), b);
-      }
-      return b;
-    }
-
-    function foldr(f, b, a) {
-      for (var i = a.table.length; i--; ) {
-        b = A2(f, a.height == 0 ? a.table[i] : foldr(f, b, a.table[i]), b);
-      }
-      return b;
-    }
-
-    // Returns a sliced tree. "to" is inclusive, but this may change,
-    // when I understand, why e.g. JS does not handle it this way. :-)
-    // If "from" or "to" is negative, they will select from the end on.
-    // TODO: currently, it slices the right, then the left. This can be
-    // optimized.
-    function slice(from, to, a) {
-      if (from < 0) { from += length(a); }
-      if (to < 0)   { to += length(a); }
-      return sliceLeft(from, sliceRight(to, a));
-    }
-
-    function sliceRight(to, a) {
-      if (to == length(a)) {
-        return a;
-      }
-
-      // Handle leaf level.
-      if (a.height == 0) {
-        var newA = { ctor:"_Array", height:0 };
-        newA.table = a.table.slice(0, to + 1);
-        return newA;
-      }
-
-      // Slice the right recursively.
-      var right = getSlot(to, a);
-      var sliced = sliceRight(to - (right > 0 ? a.lengths[right - 1] : 0), a.table[right]);
-
-      // Maybe the a node is not even needed, as sliced contains the whole slice.
-      if (right == 0) {
-        return sliced;
-      }
-
-      // Create new node.
-      var newA = { ctor:"_Array", height:a.height
-                                , table:a.table.slice(0, right + 1)
-                                , lengths:a.lengths.slice(0, right + 1) };
-      newA.table[right] = sliced;
-      newA.lengths[right] = length(sliced) + (right > 0 ? newA.lengths[right - 1] : 0);
-      return newA;
-    }
-
-    function sliceLeft(from, a) {
-      if (from == 0) {
-        return a;
-      }
-
-      // Handle leaf level.
-      if (a.height == 0) {
-        var newA = { ctor:"_Array", height:0 };
-        newA.table = a.table.slice(from, a.table.length + 1);
-        return newA;
-      }
-
-      // Slice the left recursively.
-      var left = getSlot(from, a);
-      var sliced = sliceLeft(from - (left > 0 ? a.lengths[left - 1] : 0), a.table[left]);
-
-      // Maybe the a node is not even needed, as sliced contains the whole slice.
-      if (left == a.table.length - 1) {
-        return sliced;
-      }
-
-      // Create new node.
-      var newA = { ctor:"_Array", height:a.height
-                                , table:a.table.slice(left, a.table.length + 1)
-                                , lengths:new Array(a.table.length - left) };
-      newA.table[left] = sliced;
-      var len = 0;
-      for (var i = 0; i < newA.table.length; i++) {
-        len += length(newA.table[i]);
-        newA.lengths[i] = len;
-      }
-
-      return newA;
-    }
-
-    // Appends two trees.
-    // TODO: Add support for appending trees of different sizes. Current
-    // behavior will just rise the lower tree and then append them.
-    function append(a,b) {
-      if (b.height > a.height) { return append(parentise(a, b.height), b); }
-      if (a.height > b.height) { return append(a, parentise(b, a.height)); }
-      if (a.height == 0) { return append(parentise(a, 1), parentise(b, 1)); }
-
-      var c = append_(a, b);
-      if (c[1].table.length > 0) {
-        return siblise(c[0], c[1]);
-      } else {
-        return c[0];
-      }
-    }
-
-    // Returns an array of two nodes. The second node _may_ be empty. This case
-    // needs to be handled by the function, that called append_. May be only
-    // called for trees with an minimal height of 1.
-    function append_(a, b) {
-      if (a.height == 1) {
-        // Check if balancing is needed and return based on that.
-        var toRemove = calcToRemove(a, b);
-        if (toRemove <= E) {
-          return [a,b];
-        }
-
-        return shuffle(a, b, toRemove);
-      }
-
-      var appended = append_(botRight(a), botLeft(b));
-      a = nodeCopy(a), b = nodeCopy(b);
-
-      // Adjust the bottom right side of the new tree.
-      a.table[a.table.length - 1] = appended[0];
-      a.lengths[a.lengths.length - 1] = length(appended[0])
-      a.lengths[a.lengths.length - 1] += a.lengths.length > 1 ? a.lengths[a.lengths.length - 2] : 0;
-
-      // Adjust the bottom left side of the new tree.
-      if (appended[1].table.length > 0) {
-        b.table[0] = appended[1];
-        b.lengths[0] = length(appended[1]);
-        for (var i = 1, len = length(b.table[0]); i < b.lengths.length; i++) {
-          len += length(b.table[i]);
-          b.lengths[i] = len;
-        }
-      } else {
-        b.table.shift();
-        for (var i = 1; i < b.lengths.length; i++) {
-          b.lengths[i] = b.lengths[i] - b.lengths[0];
-        }
-        b.lengths.shift();
-      }
-
-      // Check if balancing is needed and return based on that.
-      var toRemove = calcToRemove(a, b);
-      if (toRemove <= E || b.table.length == 0) {
-        return [a,b];
-      }
-
-      return shuffle(a, b, toRemove);
-    }
-
-    // Returns the extra search steps for E. Refer to the paper.
-    function calcToRemove(a, b) {
-      var subLengths = 0;
-      for (var i = 0; i < a.table.length; i++) {
-        subLengths += a.table[i].table.length;
-      }
-      for (var i = 0; i < b.table.length; i++) {
-        subLengths += b.table[i].table.length;
-      }
-
-      var toRemove = a.table.length + b.table.length
-      return toRemove - (Math.floor((subLengths - 1) / M) + 1);
-    }
-
-    // get2, set2 and saveSlot are helpers for accessing elements over two arrays.
-    function get2(a, b, index) {
-      return index < a.length ? a[index] : b[index - a.length];
-    }
-
-    function set2(a, b, index, value) {
-      if (index < a.length) {
-        a[index] = value;
-      } else {
-        b[index - a.length] = value;
-      }
-    }
-
-    function saveSlot(a, b, index, slot) {
-      set2(a.table, b.table, index, slot);
-
-      var l = (index == 0 || index == a.lengths.length) ?
-                0 : get2(a.lengths, a.lengths, index - 1);
-      set2(a.lengths, b.lengths, index, l + length(slot));
-    }
-
-    // Creates a node or leaf with a given length at their arrays for perfomance.
-    // Is only used by shuffle.
-    function createNode(h, length) {
-      if (length < 0) { length = 0; }
-      var a = { ctor:"_Array", height:h, table:new Array(length) };
-      if (h > 0) {
-        a.lengths = new Array(length);
-      }
-      return a;
-    }
-
-    // Returns an array of two balanced nodes.
-    function shuffle(a, b, toRemove) {
-      var newA = createNode(a.height, Math.min(M, a.table.length + b.table.length - toRemove));
-      var newB = createNode(a.height, newA.table.length - (a.table.length + b.table.length - toRemove));
-
-      // Skip the slots with size M. More precise: copy the slot references
-      // to the new node
-      var read = 0;
-      while (get2(a.table, b.table, read).table.length % M == 0) {
-        set2(newA.table, newB.table, read, get2(a.table, b.table, read));
-        set2(newA.lengths, newB.lengths, read, get2(a.lengths, b.lengths, read));
-        read++;
-      }
-
-      // Pulling items from left to right, caching in a slot before writing
-      // it into the new nodes.
-      var write = read;
-      var slot = new createNode(a.height - 1, 0);
-      var from = 0;
-
-      // If the current slot is still containing data, then there will be at
-      // least one more write, so we do not break this loop yet.
-      while (read - write - (slot.table.length > 0 ? 1 : 0) < toRemove) {
-        // Find out the max possible items for copying.
-        var source = get2(a.table, b.table, read);
-        var to = Math.min(M - slot.table.length, source.table.length)
-
-        // Copy and adjust size table.
-        slot.table = slot.table.concat(source.table.slice(from, to));
-        if (slot.height > 0) {
-          var len = slot.lengths.length;
-          for (var i = len; i < len + to - from; i++) {
-            slot.lengths[i] = length(slot.table[i]);
-            slot.lengths[i] += (i > 0 ? slot.lengths[i - 1] : 0);
-          }
-        }
-
-        from += to;
-
-        // Only proceed to next slots[i] if the current one was
-        // fully copied.
-        if (source.table.length <= to) {
-          read++; from = 0;
-        }
-
-        // Only create a new slot if the current one is filled up.
-        if (slot.table.length == M) {
-          saveSlot(newA, newB, write, slot);
-          slot = createNode(a.height - 1,0);
-          write++;
-        }
-      }
-
-      // Cleanup after the loop. Copy the last slot into the new nodes.
-      if (slot.table.length > 0) {
-        saveSlot(newA, newB, write, slot);
-        write++;
-      }
-
-      // Shift the untouched slots to the left
-      while (read < a.table.length + b.table.length ) {
-        saveSlot(newA, newB, write, get2(a.table, b.table, read));
-        read++; write++;
-      }
-
-      return [newA, newB];
-    }
-
-    // Navigation functions
-    function botRight(a) { return a.table[a.table.length - 1]; }
-    function botLeft(a)  { return a.table[0]; }
-
-    // Copies a node for updating. Note that you should not use this if
-    // only updating only one of "table" or "lengths" for performance reasons.
-    function nodeCopy(a) {
-      var newA = { ctor:"_Array", height:a.height
-                                , table:a.table.slice() };
-      if (a.height > 0) { newA.lengths = a.lengths.slice(); }
-      return newA;
-    }
-
-    // Returns how many items are in the tree.
-    function length(array) {
-      if (array.height == 0) {
-        return array.table.length;
-      } else {
-        return array.lengths[array.lengths.length - 1];
-      }
-    }
-
-    // Calculates in which slot of "table" the item probably is, then
-    // find the exact slot via forward searching in  "lengths". Returns the index.
-    function getSlot(i, a) {
-      var slot = Math.floor(i / (Math.pow(M, a.height)));
-      while (a.lengths[slot] <= i) {
-        slot++
-      }
-      return slot;
-    }
-
-    // Recursively creates a tree with a given height containing
-    // only the given item.
-    function create(item, h) {
-      if (h == 0) {
-        return { ctor:"_Array", height:0
-                              , table:[item] };
-      } else {
-        return { ctor:"_Array", height:h
-                              , table:[create(item, h - 1)]
-                              , lengths:[1] };
-      }
-    }
-
-    // Recursively creates a tree that contains the given tree.
-    function parentise(tree, h) {
-      if (h == tree.height) {
-        return tree;
-      } else {
-        return { ctor:"_Array", height:h
-                              , table:[parentise(tree, h - 1)]
-                              , lengths:[length(tree)] };
-      }
-    }
-
-    // Emphasizes blood brotherhood beneath two trees.
-    function siblise(a, b) {
-      return { ctor:"_Array", height:a.height + 1
-                            , table:[a, b]
-                            , lengths:[length(a), length(a) + length(b)] };
-    }
-
-    Elm.Native.Array.values = {
-      empty:empty,
-      fromList:fromList,
-      toList:toList,
-      initialize:F2(initialize),
-      append:F2(append),
-      push:F2(push),
-      slice:F3(slice),
-      get:F2(get),
-      set:F3(set),
-      map:F2(map),
-      indexedMap:F2(indexedMap),
-      foldl:F3(foldl),
-      foldr:F3(foldr),
-      length:length
-    };
-
-    return elm.Native.Array.values = Elm.Native.Array.values;
-}
 Elm.Native.Char = {};
 Elm.Native.Char.make = function(elm) {
     elm.Native = elm.Native || {};
@@ -1815,10 +1260,6 @@ Elm.Native.Utils.make = function(elm) {
         return Tuple2(posx, posy);
     }
 
-    function isJSArray(a) {
-        return a instanceof Array;
-    }
-
     return elm.Native.Utils.values = {
         eq:eq,
         cmp:cmp,
@@ -1838,7 +1279,6 @@ Elm.Native.Utils.make = function(elm) {
         mod : F2(mod),
         htmlHeight: F2(htmlHeight),
         getXY: getXY,
-        isJSArray: isJSArray,
         toFloat: function(x) { return +x; }
     };
 };
@@ -2436,7 +1876,6 @@ Elm.Native.Show.make = function(elm) {
     if (elm.Native.Show.values) return elm.Native.Show.values;
 
     var NList = Elm.Native.List.make(elm);
-    var Array = Elm.Array.make(elm);
     var List = Elm.List.make(elm);
     var Dict = Elm.Dict.make(elm);
     var Tuple2 = Elm.Native.Utils.make(elm).Tuple2;
@@ -2449,7 +1888,7 @@ Elm.Native.Show.make = function(elm) {
         } else if (type === "boolean") {
             return v ? "True" : "False";
         } else if (type === "number") {
-            return v+"";
+            return v.toFixed(2).replace(/\.0+$/g, '');
         } else if ((v instanceof String) && v.isChar) {
             return "'" + addSlashes(v) + "'";
         } else if (type === "string") {
@@ -2475,9 +1914,6 @@ Elm.Native.Show.make = function(elm) {
                     output.push(toString(v[k]));
                 }
                 return "(" + output.join(",") + ")";
-            } else if (v.ctor === "_Array") {
-                var list = Array.toList(v);
-                return "Array.fromList " + toString(list);
             } else if (v.ctor === "::") {
                 var output = '[' + toString(v._0);
                 v = v._1;
@@ -2993,6 +2429,7 @@ Elm.Native.Window.make = function(elm) {
   if (elm.Native.Window.values) return elm.Native.Window.values;
 
   var Signal = Elm.Signal.make(elm);
+  var NS = Elm.Native.Signal.make(elm);
   var Tuple2 = Elm.Native.Utils.make(elm).Tuple2;
 
   function getWidth() { return elm.node.clientWidth; }
@@ -3003,7 +2440,7 @@ Elm.Native.Window.make = function(elm) {
       return elm.node.clientHeight;
   }
 
-  var dimensions = Signal.constant(Tuple2(getWidth(), getHeight()));
+  var dimensions = NS.input(Tuple2(getWidth(), getHeight()));
   dimensions.defaultNumberOfKids = 2;
 
   // Do not move width and height into Elm. By setting the default number of kids,
@@ -3167,9 +2604,10 @@ Elm.Native.DataSource.make = function(elm) {
    
    
     return elm.Native.DataSource.values = {
+        collection: collection,
         dataSource: dataSource,
         query: F2(query),
-        mutate: F2(mutate),
+        mutate: F2(mutate)
     };
 }
 Elm.Native.Time = {};
@@ -3187,7 +2625,7 @@ Elm.Native.Time.make = function(elm) {
   function fpsWhen(desiredFPS, isOn) {
     var msPerFrame = 1000 / desiredFPS;
     var prev = Date.now(), curr = prev, diff = 0, wasOn = true;
-    var ticker = Signal.constant(diff);
+    var ticker = NS.input(diff);
     function tick(zero) { return function() {
         curr = Date.now();
         diff = zero ? 0 : curr - prev;
@@ -3198,7 +2636,7 @@ Elm.Native.Time.make = function(elm) {
     var timeoutID = 0;
     function f(isOn, t) {
       if (isOn) {
-        timeoutID = setTimeout(tick(!wasOn && isOn), msPerFrame);
+        timeoutID = elm.runDelayed(tick(!wasOn && isOn), msPerFrame);
       } else if (wasOn) {
         clearTimeout(timeoutID);
       }
@@ -3209,10 +2647,12 @@ Elm.Native.Time.make = function(elm) {
   }
 
   function every(t) {
-    var clock = Signal.constant(Date.now());
-    setInterval(function() {
+    var clock = NS.input(Date.now());
+    function tellTime() {
         elm.notify(clock.id, Date.now());
-    }, t);
+        elm.runDelayed(tellTime, t);
+    }
+    elm.runDelayed(tellTime, t);
     return clock;
   }
 
@@ -3256,9 +2696,10 @@ Elm.Native.Keyboard.make = function(elm) {
   var NList = Elm.Native.List.make(elm);
   var Utils = Elm.Native.Utils.make(elm);
 
-  var downEvents = Signal.constant(0);
-  var upEvents = Signal.constant(0);
-  var blurEvents = Signal.constant(0);
+  var NS = Elm.Native.Signal.make(elm);
+  var downEvents = NS.input(0);
+  var upEvents = NS.input(0);
+  var blurEvents = NS.input(0);
 
   elm.addListener([downEvents.id], document, 'keydown', function down(e) {
     elm.notify(downEvents.id, e.keyCode);
@@ -3273,6 +2714,8 @@ Elm.Native.Keyboard.make = function(elm) {
   });
 
   function KeyMerge(down, up, blur) {
+    this.nodeType = "merge";
+
     var args = [down,up,blur];
     this.id = Utils.guid();
     // Ignore starting values here
@@ -3553,6 +2996,128 @@ Elm.Native.Touch.make = function(elm) {
     return elm.Native.Touch.values = { touches: touches, taps: taps };
 
 };
+Elm.Native.Session = {};
+Elm.Native.Session.make = function(elm) {
+
+    // runtime error if metoer is not present
+    if (typeof Deps == "undefined") {
+        throw new Error("Deps is not defined. Are you using Meteor?");
+    }
+   
+    elm.Native = elm.Native || {};
+    elm.Native.Session = elm.Native.Session || {};
+    if (elm.Native.Session.values) return elm.Native.Session.values;
+   
+    var JS = Elm.Native.JavaScript.make(elm);
+    var DS = Elm.Native.DataSource.make(elm);
+    var Signal = Elm.Signal.make(elm);
+
+    function makeId() {
+        var text = "";
+        var possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+        for( var i=0; i < 32; i++ )
+            text += possible.charAt(Math.floor(Math.random() * possible.length));
+
+        return text;
+    }
+
+    function getCookieVal(key) {
+        var parts = document.cookie.split(';');
+        var dict = _.object(_.map(parts, function (a) {
+            return _.map(a.split("="), function (b) {return b.trim();})}));
+        return dict[key];
+    }
+    function sessionId() {
+      var sId = getCookieVal("elm-session-id");
+      if (sId) {
+          return sId;
+      }
+      sId = makeId();
+      document.cookie = 'elm-session-id=' + sId;
+      return sId;
+    }
+    window.sessionId = sessionId;
+
+    var sessions = DS.collection("sessions");
+    var sessionVars = {}; // have we dropped the default value for a variable yet?
+    function sessionVar(id) {
+        if (sessionVars[id]) {
+            return sessionVars[id].signal;
+        }
+        var NotSet = { ctor: 'NotSet' }
+        var signal = Signal.constant(NotSet);
+        var sId = sessionId();
+
+        sessionVars[id] = { signal: signal, droppedFirst: false };
+
+        function currentValue() {
+            var query = { sessionId: sId, key: id };
+            try {
+                var found = sessions.findOne(query);
+                if (typeof found == 'undefined') {
+                   return { ctor:'NotSet' };
+                }
+                var value = found.value;
+            } catch (e) {
+               // FIXME: Failure can't be gracefully handled, might make debugging hell.
+               return { ctor:'NotSet' };
+            }
+            if (value && value.ctor == 'NotSet') {
+                return value;
+            } else {
+                return { ctor:'Value', _0: value };
+            }
+        }
+
+        Deps.autorun(function () {
+            //console.log("Recv", currentValue());
+            elm.notify(signal.id, currentValue());
+        });
+        return { _: {}, signal: signal, handle : {id : id, signal: signal}};
+    }
+
+    function update(handle, value) {
+        // I am assuming this is called inside a lift.
+        var varId = handle.id;
+        if (!sessionVars[varId].droppedFirst) {
+            sessionVars[varId].droppedFirst = true;
+            return;
+        }
+
+        var _id = sessionVars[varId]._id;
+        if (!_id) {
+            var current = sessions.findOne({sessionId: sessionId(), key: varId});
+            if (current) {
+                _id = current._id;
+                sessionVars[varId]._id = _id;
+            }
+        }
+
+        if (!_id) {
+            //console.log("Insert", {sessionId: sessionId(), key: varId, value: value});
+            sessions.insert({sessionId: sessionId(), key: varId, value: value});
+        } else {
+            //console.log("Update", _id, {$set: {value: value}});
+            sessions.update(_id, {$set: {value: value}});
+        }
+    }
+
+    function destroySession() {
+        sessions.remove({ sessionId: sessionId() });
+        document.cookie = 'elm-session-id=';
+    }
+
+    function sessionsGC() {
+        // garbage collect sessions
+    }
+
+    return elm.Native.Session.values = {
+        sessionVar: sessionVar,
+        update: F2(update),
+        destroySession: destroySession
+    };
+}
 Elm.Native.WebSocket = {};
 Elm.Native.WebSocket.make = function(elm) {
 
@@ -3671,6 +3236,8 @@ Elm.Native.Signal.make = function(elm) {
   }
 
   function Input(base) {
+    this.nodeType = "input";
+
     this.id = Utils.guid();
     this.value = base;
     this.kids = [];
@@ -3685,6 +3252,8 @@ Elm.Native.Signal.make = function(elm) {
   }
 
   function LiftN(update, args) {
+    this.nodeType = "lift";
+
     this.id = Utils.guid();
     this.value = update();
     this.kids = [];
@@ -3740,6 +3309,8 @@ Elm.Native.Signal.make = function(elm) {
   }
 
   function Foldp(step, state, input) {
+    this.nodeType = "foldp";
+
     this.id = Utils.guid();
     this.value = state;
     this.kids = [];
@@ -3758,6 +3329,8 @@ Elm.Native.Signal.make = function(elm) {
   }
 
   function DropIf(pred,base,input) {
+    this.nodeType = "dropIf";
+
     this.id = Utils.guid();
     this.value = pred(input.value) ? base : input.value;
     this.kids = [];
@@ -3770,6 +3343,8 @@ Elm.Native.Signal.make = function(elm) {
   }
 
   function DropRepeats(input) {
+    this.nodeType = "dropRepeats";
+
     this.id = Utils.guid();
     this.value = input.value;
     this.kids = [];
@@ -3787,6 +3362,9 @@ Elm.Native.Signal.make = function(elm) {
   }
 
   function SampleOn(s1,s2) {
+    this.nodeType = "sampleOn";
+    this.indirectParent = s1;
+
     this.id = Utils.guid();
     this.value = s2.value;
     this.kids = [];
@@ -3811,6 +3389,8 @@ Elm.Native.Signal.make = function(elm) {
   function sampleOn(s1,s2) { return new SampleOn(s1,s2); }
 
   function delay(t,s) {
+      this.nodeType = "delay";
+
       var delayed = new Input(s.value);
       var firstEvent = true;
       function update(v) {
@@ -3822,6 +3402,8 @@ Elm.Native.Signal.make = function(elm) {
   }
 
   function Merge(s1,s2) {
+      this.nodeType = "merge";
+
       this.id = Utils.guid();
       this.value = s1.value;
       this.kids = [];
@@ -3853,7 +3435,12 @@ Elm.Native.Signal.make = function(elm) {
   function merges(ss) { return A2(foldr1, F2(merge), ss); }
 
   return elm.Native.Signal.values = {
-    constant : function(v) { return new Input(v); },
+    input: function(v) { return new Input(v); },
+    constant : function(v) {
+      var s = new Input(v);
+      s.nodeType = "constant";
+      return s;
+    },
     lift  : F2(lift ),
     lift2 : F3(lift2),
     lift3 : F4(lift3),
@@ -4267,6 +3854,9 @@ Elm.Signal.make = function (_elm) {
    $moduleName = "Signal";
    var Basics = Elm.Basics.make(_elm);
    var List = Elm.List.make(_elm);
+   var Maybe = Elm.Maybe.make(_elm);
+   var Native = Native || {};
+   Native.Error = Elm.Native.Error.make(_elm);
    var Native = Native || {};
    Native.Signal = Elm.Native.Signal.make(_elm);
    var _op = {};
@@ -4370,110 +3960,21 @@ Elm.Debug.make = function (_elm) {
    _L = _N.List.make(_elm),
    _E = _N.Error.make(_elm),
    $moduleName = "Debug";
+   var Graphics = Graphics || {};
+   Graphics.Element = Elm.Graphics.Element.make(_elm);
    var Native = Native || {};
    Native.Debug = Elm.Native.Debug.make(_elm);
    var _op = {};
+   var trace = Native.Debug.tracePath;
+   var watchSummary = Native.Debug.watchSummary;
+   var watch = Native.Debug.watch;
    var log = Native.Debug.log;
    _elm.Debug.values = {_op: _op
-                       ,log: log};
+                       ,log: log
+                       ,watch: watch
+                       ,watchSummary: watchSummary
+                       ,trace: trace};
    return _elm.Debug.values;
-};Elm.Array = Elm.Array || {};
-Elm.Array.make = function (_elm) {
-   "use strict";
-   _elm.Array = _elm.Array || {};
-   if (_elm.Array.values)
-   return _elm.Array.values;
-   var _N = Elm.Native,
-   _U = _N.Utils.make(_elm),
-   _L = _N.List.make(_elm),
-   _E = _N.Error.make(_elm),
-   $moduleName = "Array";
-   var Basics = Elm.Basics.make(_elm);
-   var List = Elm.List.make(_elm);
-   var Maybe = Elm.Maybe.make(_elm);
-   var Native = Native || {};
-   Native.Array = Elm.Native.Array.make(_elm);
-   var _op = {};
-   var append = Native.Array.append;
-   var length = Native.Array.length;
-   var slice = Native.Array.slice;
-   var set = Native.Array.set;
-   var getSafe = F3(function ($default,
-   i,
-   array) {
-      return _U.cmp(0,
-      i) < 1 && _U.cmp(i,
-      Native.Array.length(array)) < 0 ? A2(Native.Array.get,
-      i,
-      array) : $default;
-   });
-   var get = F2(function (i,
-   array) {
-      return _U.cmp(0,
-      i) < 1 && _U.cmp(i,
-      Native.Array.length(array)) < 0 ? Maybe.Just(A2(Native.Array.get,
-      i,
-      array)) : Maybe.Nothing;
-   });
-   var getUnsafe = Native.Array.get;
-   var push = Native.Array.push;
-   var empty = Native.Array.empty;
-   var filter = F2(function (isOkay,
-   arr) {
-      return function () {
-         var update = F2(function (x,
-         xs) {
-            return isOkay(x) ? A2(Native.Array.push,
-            x,
-            xs) : xs;
-         });
-         return A3(Native.Array.foldl,
-         update,
-         Native.Array.empty,
-         arr);
-      }();
-   });
-   var foldr = Native.Array.foldr;
-   var foldl = Native.Array.foldl;
-   var indexedMap = Native.Array.indexedMap;
-   var map = Native.Array.map;
-   var toIndexedList = function (array) {
-      return A2(List.zip,
-      _L.range(0,
-      Native.Array.length(array) - 1),
-      Native.Array.toList(array));
-   };
-   var toList = Native.Array.toList;
-   var fromList = Native.Array.fromList;
-   var initialize = Native.Array.initialize;
-   var repeat = F2(function (n,e) {
-      return A2(initialize,
-      n,
-      Basics.always(e));
-   });
-   var Array = {ctor: "Array"};
-   _elm.Array.values = {_op: _op
-                       ,initialize: initialize
-                       ,repeat: repeat
-                       ,fromList: fromList
-                       ,toList: toList
-                       ,toIndexedList: toIndexedList
-                       ,map: map
-                       ,indexedMap: indexedMap
-                       ,foldl: foldl
-                       ,foldr: foldr
-                       ,filter: filter
-                       ,empty: empty
-                       ,push: push
-                       ,getUnsafe: getUnsafe
-                       ,get: get
-                       ,getSafe: getSafe
-                       ,set: set
-                       ,slice: slice
-                       ,length: length
-                       ,append: append
-                       ,Array: Array};
-   return _elm.Array.values;
 };Elm.Text = Elm.Text || {};
 Elm.Text.make = function (_elm) {
    "use strict";
@@ -4823,7 +4324,7 @@ Elm.List.make = function (_elm) {
                    ,_0: _L.fromArray([])
                    ,_1: _L.fromArray([])};}
          _E.Case($moduleName,
-         "between lines 175 and 185");
+         "between lines 169 and 179");
       }();
    });
    var unzip = function (pairs) {
@@ -4850,7 +4351,7 @@ Elm.List.make = function (_elm) {
                    ,_0: _L.fromArray([])
                    ,_1: _L.fromArray([])};}
          _E.Case($moduleName,
-         "between lines 200 and 208");
+         "between lines 194 and 202");
       }();
    };
    var intersperse = F2(function (sep,
@@ -4873,7 +4374,7 @@ Elm.List.make = function (_elm) {
             case "[]":
             return _L.fromArray([]);}
          _E.Case($moduleName,
-         "between lines 218 and 223");
+         "between lines 212 and 217");
       }();
    });
    _elm.List.values = {_op: _op
@@ -5010,31 +4511,11 @@ Elm.Set.make = function (_elm) {
    var List = Elm.List.make(_elm);
    var Maybe = Elm.Maybe.make(_elm);
    var _op = {};
-   var partition = F2(function (p,
-   set) {
-      return A2(Dict.partition,
-      F2(function (k,_v0) {
-         return function () {
-            return p(k);
-         }();
-      }),
-      set);
-   });
-   var filter = F2(function (p,
-   set) {
-      return A2(Dict.filter,
-      F2(function (k,_v2) {
-         return function () {
-            return p(k);
-         }();
-      }),
-      set);
-   });
    var foldr = F3(function (f,
    b,
    s) {
       return A3(Dict.foldr,
-      F3(function (k,_v4,b) {
+      F3(function (k,_v0,b) {
          return function () {
             return A2(f,k,b);
          }();
@@ -5046,7 +4527,7 @@ Elm.Set.make = function (_elm) {
    b,
    s) {
       return A3(Dict.foldl,
-      F3(function (k,_v6,b) {
+      F3(function (k,_v2,b) {
          return function () {
             return A2(f,k,b);
          }();
@@ -5091,8 +4572,6 @@ Elm.Set.make = function (_elm) {
                      ,foldl: foldl
                      ,foldr: foldr
                      ,map: map
-                     ,filter: filter
-                     ,partition: partition
                      ,union: union
                      ,intersect: intersect
                      ,diff: diff
@@ -5128,7 +4607,7 @@ Elm.Dict.make = function (_elm) {
             case "Remove": return "Remove";
             case "Same": return "Same";}
          _E.Case($moduleName,
-         "between lines 179 and 184");
+         "between lines 136 and 141");
       }();
    };
    var RBEmpty = function (a) {
@@ -5160,7 +4639,7 @@ Elm.Dict.make = function (_elm) {
                         ,_1: t._2};}
               return max(t._4);}
          _E.Case($moduleName,
-         "between lines 84 and 101");
+         "between lines 82 and 87");
       }();
    };
    var LBBlack = {ctor: "LBBlack"};
@@ -5172,7 +4651,7 @@ Elm.Dict.make = function (_elm) {
             return "LBBlack";
             case "LBlack": return "LBlack";}
          _E.Case($moduleName,
-         "between lines 64 and 66");
+         "between lines 62 and 64");
       }();
    };
    var empty = RBEmpty(LBlack);
@@ -5195,10 +4674,10 @@ Elm.Dict.make = function (_elm) {
                    break;}
               return min(t._3);}
          _E.Case($moduleName,
-         "between lines 77 and 80");
+         "between lines 75 and 78");
       }();
    };
-   var get = F2(function (k,t) {
+   var lookup = F2(function (k,t) {
       return function () {
          switch (t.ctor)
          {case "RBEmpty":
@@ -5214,25 +4693,25 @@ Elm.Dict.make = function (_elm) {
                  switch (_v25.ctor)
                  {case "EQ":
                     return Maybe.Just(t._2);
-                    case "GT": return A2(get,
+                    case "GT": return A2(lookup,
                       k,
                       t._4);
-                    case "LT": return A2(get,
+                    case "LT": return A2(lookup,
                       k,
                       t._3);}
                  _E.Case($moduleName,
-                 "between lines 107 and 120");
+                 "between lines 93 and 99");
               }();}
          _E.Case($moduleName,
-         "between lines 104 and 120");
+         "between lines 90 and 99");
       }();
    });
    var member = F2(function (k,t) {
-      return Maybe.isJust(A2(get,
+      return Maybe.isJust(A2(lookup,
       k,
       t));
    });
-   var getSafe = F3(function (base,
+   var findWithDefault = F3(function (base,
    k,
    t) {
       return function () {
@@ -5248,48 +4727,21 @@ Elm.Dict.make = function (_elm) {
                  t._1);
                  switch (_v33.ctor)
                  {case "EQ": return t._2;
-                    case "GT": return A3(getSafe,
+                    case "GT":
+                    return A3(findWithDefault,
                       base,
                       k,
                       t._4);
-                    case "LT": return A3(getSafe,
+                    case "LT":
+                    return A3(findWithDefault,
                       base,
                       k,
                       t._3);}
                  _E.Case($moduleName,
-                 "between lines 126 and 142");
+                 "between lines 105 and 110");
               }();}
          _E.Case($moduleName,
-         "between lines 123 and 142");
-      }();
-   });
-   var getUnsafe = F2(function (k,
-   t) {
-      return function () {
-         switch (t.ctor)
-         {case "RBEmpty":
-            switch (t._0.ctor)
-              {case "LBlack":
-                 return Native.Error.raise("key not found when using \'getUnsafe\'");}
-              break;
-            case "RBNode":
-            return function () {
-                 var _v41 = A2(Native.Utils.compare,
-                 k,
-                 t._1);
-                 switch (_v41.ctor)
-                 {case "EQ": return t._2;
-                    case "GT": return A2(getUnsafe,
-                      k,
-                      t._4);
-                    case "LT": return A2(getUnsafe,
-                      k,
-                      t._3);}
-                 _E.Case($moduleName,
-                 "between lines 148 and 153");
-              }();}
-         _E.Case($moduleName,
-         "between lines 145 and 153");
+         "between lines 102 and 110");
       }();
    });
    var map = F2(function (f,t) {
@@ -5307,7 +4759,7 @@ Elm.Dict.make = function (_elm) {
               A2(map,f,t._3),
               A2(map,f,t._4));}
          _E.Case($moduleName,
-         "between lines 345 and 350");
+         "between lines 302 and 307");
       }();
    });
    var foldl = F3(function (f,
@@ -5327,7 +4779,7 @@ Elm.Dict.make = function (_elm) {
               A3(foldl,f,acc,t._3)),
               t._4);}
          _E.Case($moduleName,
-         "between lines 353 and 358");
+         "between lines 310 and 315");
       }();
    });
    var foldr = F3(function (f,
@@ -5347,7 +4799,7 @@ Elm.Dict.make = function (_elm) {
               A3(foldr,f,acc,t._4)),
               t._3);}
          _E.Case($moduleName,
-         "between lines 361 and 366");
+         "between lines 318 and 323");
       }();
    });
    var keys = function (t) {
@@ -5407,7 +4859,7 @@ Elm.Dict.make = function (_elm) {
             return _U.eq(t._0,
               Black) || _U.eq(t._0,BBlack);}
          _E.Case($moduleName,
-         "between lines 296 and 298");
+         "between lines 253 and 255");
       }();
    };
    var blacken = function (t) {
@@ -5422,7 +4874,7 @@ Elm.Dict.make = function (_elm) {
               t._3,
               t._4);}
          _E.Case($moduleName,
-         "between lines 332 and 334");
+         "between lines 289 and 291");
       }();
    };
    var Red = {ctor: "Red"};
@@ -5434,7 +4886,7 @@ Elm.Dict.make = function (_elm) {
             case "NBlack": return "NBlack";
             case "Red": return "Red";}
          _E.Case($moduleName,
-         "between lines 53 and 57");
+         "between lines 51 and 55");
       }();
    };
    var reportRemBug = F4(function (msg,
@@ -5469,7 +4921,7 @@ Elm.Dict.make = function (_elm) {
                    t._4);}
               break;}
          _E.Case($moduleName,
-         "between lines 160 and 166");
+         "between lines 117 and 123");
       }();
    };
    var moreBlack = function (c) {
@@ -5481,7 +4933,7 @@ Elm.Dict.make = function (_elm) {
             case "NBlack": return Red;
             case "Red": return Black;}
          _E.Case($moduleName,
-         "between lines 222 and 226");
+         "between lines 179 and 183");
       }();
    };
    var lessBlack = function (c) {
@@ -5493,7 +4945,7 @@ Elm.Dict.make = function (_elm) {
             return Native.Error.raise("Can\'t make a negative black node less black!");
             case "Red": return NBlack;}
          _E.Case($moduleName,
-         "between lines 229 and 233");
+         "between lines 186 and 190");
       }();
    };
    var lessBlackTree = function (t) {
@@ -5511,7 +4963,7 @@ Elm.Dict.make = function (_elm) {
               t._3,
               t._4);}
          _E.Case($moduleName,
-         "between lines 236 and 238");
+         "between lines 193 and 195");
       }();
    };
    var redden = function (t) {
@@ -5526,7 +4978,7 @@ Elm.Dict.make = function (_elm) {
               t._3,
               t._4);}
          _E.Case($moduleName,
-         "between lines 338 and 342");
+         "between lines 295 and 299");
       }();
    };
    var balance_node = function (t) {
@@ -5728,19 +5180,19 @@ Elm.Dict.make = function (_elm) {
               r._3,
               r._4));}
          _E.Case($moduleName,
-         "between lines 284 and 287");
+         "between lines 241 and 244");
       }();
    });
    var rem = F3(function (c,l,r) {
       return function () {
-         var _v183 = {ctor: "_Tuple2"
+         var _v175 = {ctor: "_Tuple2"
                      ,_0: l
                      ,_1: r};
-         switch (_v183.ctor)
+         switch (_v175.ctor)
          {case "_Tuple2":
-            switch (_v183._0.ctor)
+            switch (_v175._0.ctor)
               {case "RBEmpty":
-                 switch (_v183._1.ctor)
+                 switch (_v175._1.ctor)
                    {case "RBEmpty":
                       return function () {
                            switch (c.ctor)
@@ -5749,88 +5201,88 @@ Elm.Dict.make = function (_elm) {
                               case "Red":
                               return RBEmpty(LBlack);}
                            _E.Case($moduleName,
-                           "between lines 257 and 260");
+                           "between lines 214 and 217");
                         }();
                       case "RBNode":
                       return function () {
-                           var _v205 = {ctor: "_Tuple3"
+                           var _v197 = {ctor: "_Tuple3"
                                        ,_0: c
-                                       ,_1: _v183._0._0
-                                       ,_2: _v183._1._0};
-                           switch (_v205.ctor)
+                                       ,_1: _v175._0._0
+                                       ,_2: _v175._1._0};
+                           switch (_v197.ctor)
                            {case "_Tuple3":
-                              switch (_v205._0.ctor)
+                              switch (_v197._0.ctor)
                                 {case "Black":
-                                   switch (_v205._1.ctor)
+                                   switch (_v197._1.ctor)
                                      {case "LBlack":
-                                        switch (_v205._2.ctor)
+                                        switch (_v197._2.ctor)
                                           {case "Red": return A5(RBNode,
                                                Black,
-                                               _v183._1._1,
-                                               _v183._1._2,
-                                               _v183._1._3,
-                                               _v183._1._4);}
+                                               _v175._1._1,
+                                               _v175._1._2,
+                                               _v175._1._3,
+                                               _v175._1._4);}
                                           break;}
                                      break;}
                                 break;}
                            return A4(reportRemBug,
                            "Black, LBlack, Red",
                            c,
-                           showLColor(_v183._0._0),
-                           showNColor(_v183._1._0));
+                           showLColor(_v175._0._0),
+                           showNColor(_v175._1._0));
                         }();}
                    break;
                  case "RBNode":
-                 switch (_v183._1.ctor)
+                 switch (_v175._1.ctor)
                    {case "RBEmpty":
                       return function () {
-                           var _v209 = {ctor: "_Tuple3"
+                           var _v201 = {ctor: "_Tuple3"
                                        ,_0: c
-                                       ,_1: _v183._0._0
-                                       ,_2: _v183._1._0};
-                           switch (_v209.ctor)
+                                       ,_1: _v175._0._0
+                                       ,_2: _v175._1._0};
+                           switch (_v201.ctor)
                            {case "_Tuple3":
-                              switch (_v209._0.ctor)
+                              switch (_v201._0.ctor)
                                 {case "Black":
-                                   switch (_v209._1.ctor)
+                                   switch (_v201._1.ctor)
                                      {case "Red":
-                                        switch (_v209._2.ctor)
+                                        switch (_v201._2.ctor)
                                           {case "LBlack":
                                              return A5(RBNode,
                                                Black,
-                                               _v183._0._1,
-                                               _v183._0._2,
-                                               _v183._0._3,
-                                               _v183._0._4);}
+                                               _v175._0._1,
+                                               _v175._0._2,
+                                               _v175._0._3,
+                                               _v175._0._4);}
                                           break;}
                                      break;}
                                 break;}
                            return A4(reportRemBug,
                            "Black, Red, LBlack",
                            c,
-                           showNColor(_v183._0._0),
-                           showLColor(_v183._1._0));
+                           showNColor(_v175._0._0),
+                           showLColor(_v175._1._0));
                         }();
                       case "RBNode":
                       return function () {
                            var l$ = A5(remove_max,
-                           _v183._0._0,
-                           _v183._0._1,
-                           _v183._0._2,
-                           _v183._0._3,
-                           _v183._0._4);
+                           _v175._0._0,
+                           _v175._0._1,
+                           _v175._0._2,
+                           _v175._0._3,
+                           _v175._0._4);
                            var r = A5(RBNode,
-                           _v183._1._0,
-                           _v183._1._1,
-                           _v183._1._2,
-                           _v183._1._3,
-                           _v183._1._4);
+                           _v175._1._0,
+                           _v175._1._1,
+                           _v175._1._2,
+                           _v175._1._3,
+                           _v175._1._4);
                            var l = A5(RBNode,
-                           _v183._0._0,
-                           _v183._0._1,
-                           _v183._0._2,
-                           _v183._0._3,
-                           _v183._0._4);
+                           _v175._0._0,
+                           _v175._0._1,
+                           _v175._0._2,
+                           _v175._0._3,
+                           _v175._0._4);
                            var $ = max(l),
                            k = $._0,
                            v = $._1;
@@ -5839,7 +5291,7 @@ Elm.Dict.make = function (_elm) {
                    break;}
               break;}
          _E.Case($moduleName,
-         "between lines 256 and 274");
+         "between lines 213 and 231");
       }();
    });
    var update = F3(function (k,
@@ -5853,15 +5305,15 @@ Elm.Dict.make = function (_elm) {
                   switch (t._0.ctor)
                     {case "LBlack":
                        return function () {
-                            var _v220 = u(Maybe.Nothing);
-                            switch (_v220.ctor)
+                            var _v212 = u(Maybe.Nothing);
+                            switch (_v212.ctor)
                             {case "Just":
                                return {ctor: "_Tuple2"
                                       ,_0: Insert
                                       ,_1: A5(RBNode,
                                       Red,
                                       k,
-                                      _v220._0,
+                                      _v212._0,
                                       empty,
                                       empty)};
                                case "Nothing":
@@ -5869,25 +5321,25 @@ Elm.Dict.make = function (_elm) {
                                       ,_0: Same
                                       ,_1: empty};}
                             _E.Case($moduleName,
-                            "between lines 188 and 191");
+                            "between lines 145 and 148");
                          }();}
                     break;
                   case "RBNode":
                   return function () {
-                       var _v222 = A2(Native.Utils.compare,
+                       var _v214 = A2(Native.Utils.compare,
                        k,
                        t._1);
-                       switch (_v222.ctor)
+                       switch (_v214.ctor)
                        {case "EQ": return function () {
-                               var _v223 = u(Maybe.Just(t._2));
-                               switch (_v223.ctor)
+                               var _v215 = u(Maybe.Just(t._2));
+                               switch (_v215.ctor)
                                {case "Just":
                                   return {ctor: "_Tuple2"
                                          ,_0: Same
                                          ,_1: A5(RBNode,
                                          t._0,
                                          t._1,
-                                         _v223._0,
+                                         _v215._0,
                                          t._3,
                                          t._4)};
                                   case "Nothing":
@@ -5895,7 +5347,7 @@ Elm.Dict.make = function (_elm) {
                                          ,_0: Remove
                                          ,_1: A3(rem,t._0,t._3,t._4)};}
                                _E.Case($moduleName,
-                               "between lines 192 and 195");
+                               "between lines 149 and 152");
                             }();
                           case "GT": return function () {
                                var $ = up(t._4),
@@ -5931,7 +5383,7 @@ Elm.Dict.make = function (_elm) {
                                             t._3,
                                             r$)};}
                                   _E.Case($moduleName,
-                                  "between lines 201 and 205");
+                                  "between lines 158 and 162");
                                }();
                             }();
                           case "LT": return function () {
@@ -5968,14 +5420,14 @@ Elm.Dict.make = function (_elm) {
                                             l$,
                                             t._4)};}
                                   _E.Case($moduleName,
-                                  "between lines 196 and 200");
+                                  "between lines 153 and 157");
                                }();
                             }();}
                        _E.Case($moduleName,
-                       "between lines 191 and 205");
+                       "between lines 148 and 162");
                     }();}
                _E.Case($moduleName,
-               "between lines 187 and 205");
+               "between lines 144 and 162");
             }();
          };
          var $ = up(t),
@@ -5989,7 +5441,7 @@ Elm.Dict.make = function (_elm) {
                return blacken(t$);
                case "Same": return t$;}
             _E.Case($moduleName,
-            "between lines 206 and 211");
+            "between lines 163 and 168");
          }();
       }();
    });
@@ -5997,7 +5449,7 @@ Elm.Dict.make = function (_elm) {
    v,
    t) {
       return function () {
-         var u = function (_v228) {
+         var u = function (_v220) {
             return function () {
                return Maybe.Just(v);
             }();
@@ -6019,77 +5471,42 @@ Elm.Dict.make = function (_elm) {
       t2,
       t1);
    });
+   var intersect = F2(function (t1,
+   t2) {
+      return function () {
+         var combine = F3(function (k,
+         v,
+         t) {
+            return A2(member,
+            k,
+            t2) ? A3(insert,k,v,t) : t;
+         });
+         return A3(foldl,
+         combine,
+         empty,
+         t1);
+      }();
+   });
    var fromList = function (assocs) {
       return A3(List.foldl,
-      F2(function (_v230,d) {
+      F2(function (_v222,d) {
          return function () {
-            switch (_v230.ctor)
+            switch (_v222.ctor)
             {case "_Tuple2":
                return A3(insert,
-                 _v230._0,
-                 _v230._1,
+                 _v222._0,
+                 _v222._1,
                  d);}
             _E.Case($moduleName,
-            "on line 394, column 43 to 55");
+            "on line 353, column 43 to 55");
          }();
       }),
       empty,
       assocs);
    };
-   var filter = F2(function (p,
-   dict) {
-      return function () {
-         var add = F3(function (k,
-         v,
-         t) {
-            return A2(p,k,v) ? A3(insert,
-            k,
-            v,
-            t) : t;
-         });
-         return A3(foldl,add,empty,dict);
-      }();
-   });
-   var intersect = F2(function (t1,
-   t2) {
-      return A2(filter,
-      F2(function (k,_v234) {
-         return function () {
-            return A2(member,k,t2);
-         }();
-      }),
-      t1);
-   });
-   var partition = F2(function (p,
-   dict) {
-      return function () {
-         var add = F3(function (k,
-         v,
-         _v236) {
-            return function () {
-               switch (_v236.ctor)
-               {case "_Tuple2": return A2(p,
-                    k,
-                    v) ? {ctor: "_Tuple2"
-                         ,_0: A3(insert,k,v,_v236._0)
-                         ,_1: _v236._1} : {ctor: "_Tuple2"
-                                          ,_0: _v236._0
-                                          ,_1: A3(insert,k,v,_v236._1)};}
-               _E.Case($moduleName,
-               "between lines 408 and 410");
-            }();
-         });
-         return A3(foldl,
-         add,
-         {ctor: "_Tuple2"
-         ,_0: empty
-         ,_1: empty},
-         dict);
-      }();
-   });
    var remove = F2(function (k,t) {
       return function () {
-         var u = function (_v240) {
+         var u = function (_v226) {
             return function () {
                return Maybe.Nothing;
             }();
@@ -6110,13 +5527,10 @@ Elm.Dict.make = function (_elm) {
                       ,singleton: singleton
                       ,insert: insert
                       ,update: update
-                      ,get: get
-                      ,getSafe: getSafe
-                      ,getUnsafe: getUnsafe
+                      ,lookup: lookup
+                      ,findWithDefault: findWithDefault
                       ,remove: remove
                       ,member: member
-                      ,filter: filter
-                      ,partition: partition
                       ,foldl: foldl
                       ,foldr: foldr
                       ,map: map
@@ -6416,6 +5830,44 @@ Elm.Color.make = function (_elm) {
                        ,Linear: Linear
                        ,Radial: Radial};
    return _elm.Color.values;
+};Elm.Session = Elm.Session || {};
+Elm.Session.make = function (_elm) {
+   "use strict";
+   _elm.Session = _elm.Session || {};
+   if (_elm.Session.values)
+   return _elm.Session.values;
+   var _N = Elm.Native,
+   _U = _N.Utils.make(_elm),
+   _L = _N.List.make(_elm),
+   _E = _N.Error.make(_elm),
+   $moduleName = "Session";
+   var Native = Native || {};
+   Native.Session = Elm.Native.Session.make(_elm);
+   var Signal = Elm.Signal.make(_elm);
+   var _op = {};
+   var destroySession = Native.Session.destroySession;
+   var update = Native.Session.update;
+   var sessionVar = Native.Session.sessionVar;
+   var SessionVar = F2(function (a,
+   b) {
+      return {_: {}
+             ,handle: a
+             ,signal: b};
+   });
+   var Handle = {ctor: "Handle"};
+   var Value = function (a) {
+      return {ctor: "Value",_0: a};
+   };
+   var NotSet = {ctor: "NotSet"};
+   _elm.Session.values = {_op: _op
+                         ,sessionVar: sessionVar
+                         ,update: update
+                         ,destroySession: destroySession
+                         ,NotSet: NotSet
+                         ,Value: Value
+                         ,Handle: Handle
+                         ,SessionVar: SessionVar};
+   return _elm.Session.values;
 };Elm.Regex = Elm.Regex || {};
 Elm.Regex.make = function (_elm) {
    "use strict";
@@ -8068,7 +7520,485 @@ Elm.Graphics.Input.Field.make = function (_elm) {
                                       ,Content: Content
                                       ,Selection: Selection};
    return _elm.Graphics.Input.Field.values;
-};(function() {
+};
+(function() {
+
+
+if (typeof window != "undefined" && !window.location.origin) {
+  window.location.origin =
+      window.location.protocol + "//" +
+      window.location.hostname +
+      (window.location.port ? (':' + window.location.port) : '');
+}
+
+Elm.Debugger = null;
+Elm.debuggerAttach = function(module, hotSwapState /* =undefined */) {
+  return {
+    make: function(runtime) {
+      var wrappedModule = debugModule(module, runtime);
+      Elm.Debugger = debuggerInit(wrappedModule, runtime, hotSwapState);
+      dispatchElmDebuggerInit();
+      return wrappedModule.moduleInstance;
+    }
+  };
+};
+
+function dispatchElmDebuggerInit() {
+  if (parent.window) {
+    var dispatch = function(_) {
+      parent.window.postMessage("elmDebuggerInit", window.location.origin);
+    };
+    if (parent.window.document.readyState === "complete") {
+      dispatch();
+    }
+    else {
+      parent.window.addEventListener("load", dispatch);
+    }
+  }
+}
+
+function debugModule(module, runtime) {
+  var programPaused = false;
+  var recordedEvents = [];
+  var asyncCallbacks = [];
+  var watchTracker = Elm.Native.Debug.make(runtime).watchTracker;
+
+  function wrapNotify(id, v) {
+    var timestep = Date.now();
+
+    if (programPaused) {
+      // ignore async events generated while playing back
+      // or user events while program is paused
+      return false;
+    }
+    else {
+      var changed = runtime.notify(id, v, timestep);
+      recordEvent(id, v, timestep);
+      if (parent.window) {
+        parent.window.postMessage("elmNotify", window.location.origin);
+      }
+      return changed;
+    }
+  };
+
+  function wrapRunDelayed(func, delayMs) {
+    var cbObj = { func:func, delayMs:delayMs, timerId:0, executed:false };
+    var timerId = setTimeout(function() {
+        cbObj.executed = true;
+        func();
+      }, delayMs);
+    cbObj.timerId = timerId;
+    asyncCallbacks.push(cbObj);
+    return timerId;
+  }
+
+  function recordEvent(id, v, timestep) {
+    watchTracker.pushFrame();
+    recordedEvents.push({ id:id, value:v, timestep:timestep });
+  }
+
+  function clearAsyncCallbacks() {
+    asyncCallbacks.forEach(function(timer) {
+      if (!timer.executed) {
+        clearTimeout(timer.timerId);
+      }
+    });
+  }
+
+  function clearRecordedEvents() {
+    recordedEvents = [];
+  }
+
+  function getRecordedEventsLength() {
+    return recordedEvents.length;
+  }
+
+  function getRecordedEventAt(i) {
+    return recordedEvents[i];
+  }
+
+  function copyRecordedEvents() {
+    return recordedEvents.slice();
+  }
+
+  function loadRecordedEvents(events) {
+    recordedEvents = events.slice();
+  }
+
+  function setPaused(v) {
+    programPaused = v;
+    if (programPaused) {
+      clearAsyncCallbacks();
+      tracePath.stopRecording();
+    }
+    else {
+      // executeCallbacks should only be called when continuing, not when restarting.
+      //executeCallbacks(asyncCallbacks, false);
+      tracePath.startRecording();
+    }
+  }
+
+  function getPaused() {
+    return programPaused;
+  }
+
+  // runtime is the prototype of wrappedRuntime
+  // so we can access all runtime properties too
+  var wrappedRuntime = Object.create(runtime);
+  wrappedRuntime.notify = wrapNotify;
+  wrappedRuntime.runDelayed = wrapRunDelayed;
+
+  var assignedPropTracker = Object.create(wrappedRuntime);
+  var moduleInstance = module.make(assignedPropTracker);
+  
+  // make sure the signal graph is actually a signal & extract the visual model
+  if ( !('recv' in moduleInstance.main) ) {
+      moduleInstance.main = Elm.Signal.make(runtime).constant(moduleInstance.main);
+  }
+
+  // The main module stores imported modules onto the runtime.
+  // To ensure only one instance of each module is created,
+  // we assign them back on the original runtime object.
+  Object.keys(assignedPropTracker).forEach(function(key) {
+    runtime[key] = assignedPropTracker[key];
+  });
+
+  var moduleNodes = flattenNodes(wrappedRuntime.inputs);
+  var tracePath = tracePathInit(runtime, moduleInstance.main);
+
+  return {
+    moduleInstance: moduleInstance,
+    moduleNodes: moduleNodes,
+    initialNodeValues: saveNodeValues(moduleNodes),
+    initialAsyncCallbacks: asyncCallbacks.slice(),
+    // API functions
+    clearAsyncCallbacks: clearAsyncCallbacks,
+    clearRecordedEvents: clearRecordedEvents,
+    getRecordedEventsLength: getRecordedEventsLength,
+    getRecordedEventAt: getRecordedEventAt,
+    copyRecordedEvents: copyRecordedEvents,
+    loadRecordedEvents: loadRecordedEvents,
+    getPaused: getPaused,
+    setPaused: setPaused,
+    tracePath: tracePath,
+    watchTracker: watchTracker,
+  };
+}
+
+function debuggerInit(debugModule, runtime, hotSwapState /* =undefined */) {
+  var eventCounter = 0;
+
+  function resetProgram() {
+    debugModule.clearAsyncCallbacks();
+    restoreNodeValues(debugModule.moduleNodes, debugModule.initialNodeValues);
+    redrawGraphics();
+  }
+
+  function restartProgram() {
+    resetProgram();
+    debugModule.watchTracker.clear();
+    debugModule.tracePath.clearTraces();
+    debugModule.clearRecordedEvents();
+    debugModule.setPaused(false);
+    executeCallbacks(debugModule.initialAsyncCallbacks, true);
+  }
+
+  function pauseProgram() {
+    debugModule.setPaused(true);
+    eventCounter = debugModule.getRecordedEventsLength();
+  }
+
+  function continueProgram() {
+    if (debugModule.getPaused())
+    {
+      debugModule.setPaused(false);
+    }
+  }
+
+  function stepTo(index) {
+    if (!debugModule.getPaused()) {
+      debugModule.setPaused(true);
+      resetProgram();
+    }
+
+    if (index < 0 || index > getMaxSteps()) {
+      throw "Index out of bounds: " + index;
+    }
+
+    if (index < eventCounter) {
+      resetProgram();
+      eventCounter = 0;
+    }
+
+    assert(index >= eventCounter, "index must be bad");
+    while (eventCounter < index) {
+      var nextEvent = debugModule.getRecordedEventAt(eventCounter);
+      runtime.notify(nextEvent.id, nextEvent.value, nextEvent.timestep);
+
+      eventCounter += 1;
+    }
+    assert(eventCounter == index, "while loop didn't work");
+  }
+
+  function getMaxSteps() {
+    return debugModule.getRecordedEventsLength();
+  }
+
+  function doPlayback(eventList) {
+    var x = eventList.shift();
+    var time = x[2];
+    runtime.notify(x[0], x[1], x[2]);
+
+    if (eventList.length > 0) {
+      var delta = eventList[0][2] - time;
+      setTimeout(function() { doPlayback(eventList); }, delta);
+    }
+  }
+
+  function redrawGraphics() {
+    var main = debugModule.moduleInstance.main
+    for (var i = main.kids.length ; i-- ; ) {
+      main.kids[i].recv(Date.now(), true, main.id);
+    }
+  }
+
+  function getHotSwapState() {
+    var counter = eventCounter;
+    if (!debugModule.getPaused()) {
+      counter = getMaxSteps();
+    }
+    return {
+      recordedEvents: debugModule.copyRecordedEvents(),
+      eventCounter: counter
+    };
+  }
+
+  function dispose() {
+    var parentNode = runtime.node.parentNode;
+    parentNode.removeChild(debugModule.tracePath.canvas);
+    parentNode.removeChild(runtime.node);
+  }
+
+  if (hotSwapState) {
+    debugModule.setPaused(true);
+    debugModule.loadRecordedEvents(hotSwapState.recordedEvents);
+
+    // draw new trace path
+    debugModule.tracePath.startRecording();
+    stepTo(getMaxSteps());
+    debugModule.tracePath.stopRecording();
+
+    stepTo(hotSwapState.eventCounter);
+  }
+
+  runtime.node.parentNode.appendChild(debugModule.tracePath.canvas);
+
+  var elmDebugger = {
+      restart: restartProgram,
+      pause: pauseProgram,
+      kontinue: continueProgram,
+      getMaxSteps: getMaxSteps,
+      stepTo: stepTo,
+      getPaused: debugModule.getPaused,
+      getHotSwapState: getHotSwapState,
+      dispose: dispose,
+      allNodes: debugModule.moduleNodes,
+      watchTracker: debugModule.watchTracker,
+      mainNode: debugModule.moduleInstance.main
+  };
+
+  return elmDebugger;
+}
+
+function Point(x, y) {
+  this.x = x;
+  this.y = y;
+
+  this.translate = function(x, y) {
+    return new Point(this.x + x, this.y + y);
+  }
+
+  this.equals = function(p) {
+    return this.x == p.x && this.y == p.y;
+  }
+}
+
+function tracePathInit(runtime, mainNode) {
+  var List = Elm.List.make(runtime);
+  var Signal = Elm.Signal.make(runtime);
+  var tracePathNode = A2(Signal.lift, graphicsUpdate, mainNode);
+  var tracePathCanvas = createCanvas();
+  var tracePositions = {};
+  var recordingTraces = true;
+
+  function findPositions(currentScene) {
+    var positions = {};
+    function processElement(elem, offset) {
+      if (elem.element.ctor == "Custom" && elem.element.type == "Collage")
+      {
+        List.map(F2(processForm)(offset))(elem.element.model.forms);
+      }
+      if (elem.props.debugTracePathId)
+      {
+        positions[elem.props.debugTracePathId] = new Point(offset.x, offset.y);
+      }
+    }
+
+    function processForm(offset, form) {
+      if (form.form.ctor == "FElement")
+      {
+        processElement(form.form._0, offset.translate(form.x, -form.y));
+      }
+    }
+
+    processElement(currentScene, new Point(0, 0));
+    return positions;
+  }
+
+  function appendPositions(positions) {
+    for (var id in positions) {
+      var pos = positions[id];
+      if (tracePositions.hasOwnProperty(id)) {
+        var points = tracePositions[id];
+        if (!pos.equals(points[points.length-1])) {
+          points.push(pos);
+        }
+      }
+      else {
+        tracePositions[id] = [pos];
+      }
+    }
+  }
+
+  function graphicsUpdate(currentScene) {
+    if (!recordingTraces) {
+      return;
+    }
+
+    var ctx = tracePathCanvas.getContext('2d');
+    ctx.clearRect(0, 0, tracePathCanvas.width, tracePathCanvas.height);
+
+    ctx.save();
+    ctx.translate(ctx.canvas.width/2, ctx.canvas.height/2);
+    appendPositions(findPositions(currentScene));
+    for (var id in tracePositions)
+    {
+      ctx.beginPath();
+      var points = tracePositions[id];
+      for (var i=0; i < points.length; i++)
+      {
+        var p = points[i];
+        if (i == 0) {
+          ctx.moveTo(p.x, p.y);
+        }
+        else {
+          ctx.lineTo(p.x, p.y);
+        }
+      }
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(50, 50, 50, 0.4)";
+      ctx.stroke();
+
+      for (var i=0; i < points.length; i++)
+      {
+        var p = points[i];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(50, 50, 50, 0.4)";
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function clearTraces() {
+    tracePositions = {};
+  }
+
+  function stopRecording() {
+    recordingTraces = false;
+  }
+
+  function startRecording() {
+    recordingTraces = true;
+  }
+
+  return {
+    graphicsUpdate: graphicsUpdate,
+    canvas: tracePathCanvas,
+    clearTraces: clearTraces,
+    stopRecording: stopRecording,
+    startRecording: startRecording
+  }
+}
+
+
+function executeCallbacks(callbacks, reexecute) {
+  callbacks.forEach(function(timer) {
+    if (reexecute || !timer.executed) {
+      var func = timer.func;
+      func();
+    }
+  });
+}
+
+function createCanvas() {
+  var c = document.createElement('canvas');
+  c.width = window.innerWidth;
+  c.height = window.innerHeight;
+  c.style.position = "absolute";
+  c.style.top = "0";
+  c.style.left = "0";
+  c.style.pointerEvents = "none";
+  return c;
+}
+
+function assert(bool, msg) {
+  if (!bool) {
+    throw "Assertion error: " + msg;
+  }
+}
+
+function saveNodeValues(allNodes) {
+  var nodeValues = [];
+
+  allNodes.forEach(function(node) {
+    nodeValues.push({ value: node.value, id: node.id });
+  });
+
+  return nodeValues;
+};
+
+
+function restoreNodeValues(allNodes, nodeStates) {
+  assert(allNodes.length == nodeStates.length, "saved program state has wrong length");
+  for (var i=0; i < allNodes.length; i++) {
+    var node = allNodes[i];
+    var state = nodeStates[i];
+    assert(node.id == state.id, "the nodes moved position");
+
+    node.value = state.value;
+  }
+}
+
+function flattenNodes(nodes) {
+  var nodesById = {};
+
+  function addAllToDict(node) {
+    nodesById[node.id] = node;
+    node.kids.forEach(addAllToDict);
+  }
+  nodes.forEach(addAllToDict);
+
+  var allNodes = Object.keys(nodesById).sort().map(function(key) {
+    return nodesById[key];
+  });
+  return allNodes;
+};
+
+}());
+(function() {
 
 // Returns boolean indicating if the swap was successful.
 // Requires that the two signal graphs have exactly the same
@@ -8196,6 +8126,11 @@ function init(display, container, module, ports, moduleToReplace) {
       return newElm;
   }
 
+  function dispose() {
+    removeListeners(listeners);
+    inputs = [];
+  }
+
   var Module = {};
   var reportAnyErrors = function() {};
   try {
@@ -8222,7 +8157,11 @@ function init(display, container, module, ports, moduleToReplace) {
   }
 
   reportAnyErrors();
-  return { swap:swap, ports:elm.ports.outgoing };
+  return {
+    swap:swap,
+    ports:elm.ports.outgoing,
+    dispose:dispose
+  };
 };
 
 function checkPorts(elm) {
@@ -8315,8 +8254,9 @@ function addReceivers(ports) {
 }
 
 function initGraphics(elm, Module) {
-  if (!('main' in Module))
+  if (!('main' in Module)) {
       throw new Error("'main' is missing! What do I display?!");
+  }
 
   var signalGraph = Module.main;
 
