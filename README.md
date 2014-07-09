@@ -4,5 +4,5 @@ Tests for [this fork](https://github.com/shashi/Elm) of [Elm](http://elm-lang.or
 
 This is a version of [Stamps](http://elm-lang.org/examples/Intermediate/Stamps.elm) that has persistence and can be used by multiple users in real-time.
 
-See [stamp/main.elm](https://github.com/shashi/blob/elm-on-meteor/stamp/main.elm) for the full code!
+See [stamp/test.elm](https://github.com/shashi/blob/elm-on-meteor/stamp/test.elm) for the full code!
 
